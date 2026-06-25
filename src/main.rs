@@ -54,8 +54,10 @@ fn preload_migraphx_tf_stub(
     }
 
     let path = env::var("MIGRAPHX_TF_STUB_PATH").unwrap_or_else(|_| {
-        "/home/maher/.local/share/gpu-diarization-build/migraphx-install/lib/libmigraphx_tf_stub.so"
-            .to_string()
+        let data = env::var("XDG_DATA_HOME")
+            .or_else(|_| env::var("HOME").map(|h| format!("{h}/.local/share")))
+            .unwrap_or_default();
+        format!("{data}/gpu-diarization-build/migraphx-install/lib/libmigraphx_tf_stub.so")
     });
     let path = PathBuf::from(path);
     if !path.exists() {

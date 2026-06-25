@@ -9,8 +9,10 @@ use ort::session::Session;
 #[cfg(unix)]
 fn preload_migraphx_tf_stub() -> Result<Option<libloading::os::unix::Library>, String> {
     let path = env::var("MIGRAPHX_TF_STUB_PATH").unwrap_or_else(|_| {
-        "/home/maher/.local/share/gpu-diarization-build/migraphx-install/lib/libmigraphx_tf_stub.so"
-            .to_string()
+        let data = env::var("XDG_DATA_HOME")
+            .or_else(|_| env::var("HOME").map(|h| format!("{h}/.local/share")))
+            .unwrap_or_default();
+        format!("{data}/gpu-diarization-build/migraphx-install/lib/libmigraphx_tf_stub.so")
     });
     let path = PathBuf::from(path);
     if !path.exists() {
@@ -33,9 +35,13 @@ fn preload_migraphx_tf_stub() -> Result<Option<()>, String> {
 }
 
 fn default_segmentation_model() -> PathBuf {
-    PathBuf::from(
-        "/home/maher/.cache/huggingface/hub/models--avencera--speakrs-models/snapshots/5d24ffee75f13fb061fa6d10944a64e2dc1d5e6f/segmentation-3.0.onnx",
-    )
+    let cache = env::var("HF_HOME")
+        .or_else(|_| env::var("XDG_CACHE_HOME").map(|c| format!("{c}/huggingface")))
+        .or_else(|_| env::var("HOME").map(|h| format!("{h}/.cache/huggingface")))
+        .unwrap_or_default();
+    PathBuf::from(format!(
+        "{cache}/hub/models--avencera--speakrs-models/snapshots/5d24ffee75f13fb061fa6d10944a64e2dc1d5e6f/segmentation-3.0.onnx"
+    ))
 }
 
 fn init_ort() -> Result<(), String> {
