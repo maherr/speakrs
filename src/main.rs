@@ -1,6 +1,6 @@
 use serde::Serialize;
 use speakrs::pipeline::{FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS};
-use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
+use speakrs::{ExecutionMode, ModelManager, OwnedDiarizationPipeline};
 use std::env;
 use std::process;
 use std::time::Instant;
@@ -27,6 +27,8 @@ struct DiarizationResult {
 enum CliMode {
     Cpu,
     MiGraphX,
+    Cuda,
+    CudaFast,
 }
 
 impl CliMode {
@@ -34,6 +36,8 @@ impl CliMode {
         match self {
             Self::Cpu => ExecutionMode::Cpu,
             Self::MiGraphX => ExecutionMode::MiGraphX,
+            Self::Cuda => ExecutionMode::Cuda,
+            Self::CudaFast => ExecutionMode::CudaFast,
         }
     }
 
@@ -41,6 +45,8 @@ impl CliMode {
         match self {
             Self::Cpu => "cpu",
             Self::MiGraphX => "migraphx",
+            Self::Cuda => "cuda",
+            Self::CudaFast => "cuda-fast",
         }
     }
 }
@@ -89,6 +95,8 @@ fn parse_args(args: &[String]) -> Result<(CliMode, &str), String> {
         match args[idx].as_str() {
             "--cpu" => mode = CliMode::Cpu,
             "--gpu" | "--migraphx" => mode = CliMode::MiGraphX,
+            "--cuda" => mode = CliMode::Cuda,
+            "--cuda-fast" => mode = CliMode::CudaFast,
             "--mode" => {
                 idx += 1;
                 let Some(value) = args.get(idx) else {
@@ -97,9 +105,11 @@ fn parse_args(args: &[String]) -> Result<(CliMode, &str), String> {
                 mode = match value.as_str() {
                     "cpu" => CliMode::Cpu,
                     "gpu" | "migraphx" => CliMode::MiGraphX,
+                    "cuda" => CliMode::Cuda,
+                    "cuda-fast" => CliMode::CudaFast,
                     other => {
                         return Err(format!(
-                            "Unsupported mode `{other}`. Use `cpu` or `migraphx`."
+                            "Unsupported mode `{other}`. Use `cpu`, `migraphx`, `cuda`, or `cuda-fast`."
                         ));
                     }
                 };
@@ -125,8 +135,40 @@ fn parse_args(args: &[String]) -> Result<(CliMode, &str), String> {
         .ok_or_else(|| "Missing WAV file path".to_string())
 }
 
+/// The library's file list for the CUDA modes leaves out one model its loader
+/// opens, so a first CUDA run on a clean cache could not start.
+const CUDA_EXTRA_MODEL_FILES: &[&str] = &["wespeaker-voxceleb-resnet34-tail.onnx"];
+
+/// The CUDA modes download more model files than the others, and the library
+/// picks its code path from the files it finds beside the base models. Their
+/// own cache keeps a CPU or MIGraphX run on the files it has always had.
+fn cuda_model_cache_dir() -> std::path::PathBuf {
+    let base = env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(|| std::path::PathBuf::from(".cache"));
+    base.join("speakrs-cli").join("cuda-models")
+}
+
+fn load_pipeline(cli_mode: CliMode, mode: ExecutionMode) -> Result<OwnedDiarizationPipeline, String> {
+    if !matches!(cli_mode, CliMode::Cuda | CliMode::CudaFast) {
+        return OwnedDiarizationPipeline::from_pretrained(mode).map_err(|e| e.to_string());
+    }
+    let manager =
+        ModelManager::with_cache_dir(cuda_model_cache_dir()).map_err(|e| e.to_string())?;
+    let models_dir = manager.ensure(mode).map_err(|e| e.to_string())?;
+    for file in CUDA_EXTRA_MODEL_FILES {
+        manager.get(file).map_err(|e| e.to_string())?;
+    }
+    OwnedDiarizationPipeline::from_dir(models_dir, mode).map_err(|e| e.to_string())
+}
+
 fn print_usage() {
-    eprintln!("Usage: speakrs-cli [--cpu|--gpu|--mode cpu|migraphx] <wav_file>");
+    eprintln!(
+        "Usage: speakrs-cli [--cpu|--gpu|--cuda|--cuda-fast|--mode cpu|migraphx|cuda|cuda-fast] <wav_file>"
+    );
+    eprintln!("  --gpu is MIGraphX (AMD). --cuda and --cuda-fast are NVIDIA.");
     eprintln!("  Input must be 16kHz mono WAV.");
     eprintln!("  Outputs JSON with speaker segments to stdout.");
 }
@@ -195,7 +237,7 @@ fn main() {
     };
 
     // Initialize pipeline (downloads models on first run)
-    let mut pipeline = match OwnedDiarizationPipeline::from_pretrained(mode) {
+    let mut pipeline = match load_pipeline(cli_mode, mode) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error initializing pipeline: {}", e);
